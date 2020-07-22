@@ -1,0 +1,5 @@
+et-xmlfile==1.0.1
+jdcal==1.4.1
+openpyxl==3.0.4
+psycopg2==2.8.5
+xlrd==1.2.0
