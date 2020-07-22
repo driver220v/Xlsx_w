@@ -10,11 +10,10 @@ import xlrd
 import datetime
 import xlrd.biffh
 import string
+import shutil
 
 # punct = знаки пунктуации (чтобы исключить возможность заголовков с пунктуацией)
 punct = string.punctuation
-mistakes_ls = []
-mistakes = []
 
 
 def get_clean_num(num, to_check=None):
@@ -186,302 +185,307 @@ def check_header(raw_value):
 def read_xlsx(file):
     wb = load_workbook(filename=f'{work_dicts["work_dir"]}/{file}')
     ws = wb.active
+    if ws.max_column >= 40:
+        # переменные для изменения полей created_by, updated_by
+        updated_by = 'patrik'
+        created_by = 'patrik'
 
-    # doubles = повторяющиеся в accounting_num-pu_num в БД
-    doubles = 0
-    # count = строка по которой происходит итерация.
-    # т.к. нумерация в excel начинается в excel файле начинается с 1
-    # count изанчально = 1
-    count = 1
-    # error = строка, где информация некорректна
-    errors = 0
-    # suc = строка, по значениям которой
-    # произведен успешно insert
-    suc = 0
-    # in_base = значения строки,
-    # по которой производится итерация,
-    # аналогична значениям в БД
-    in_base = 0
-    # updated = изменения внесены в БД
-    updated = 0
-    # колличество проанализированных строк
-    row_counter = 0
-    load_type = 'old'
-    idn_counter = 0
-    # Если верхние строчки смерджины(объединены в одну)
-    if type(ws.cell(row=count, column=count + 1)).__name__ == 'MergedCell':
-        count += 1
-    # check if row value is header
-    # добавлена проверка названия столбца и его значения
-    is_header = check_header(ws.cell(row=count, column=40).value)
-    if is_header is True:
-        count += 1
-    print('count', count)
-    for row in ws.iter_rows(min_row=count):
-        try:
-            idn_counter += 1
-            # ls = NPOTERI_PR- в excel(пример),  Accounting_Num - в БД
-            ls = str(row[40].value)
-            # сканируем занчение в 40-овом стобце для  поддержки старой логики
-            if not ls or len(ls) < 12 or not re.search('\d{5}-\d{3}-\d{2}', ls):
-                # новая логика для = проверка поля IKTS(10-го стобца)
-                # IKTS - в Excel, Accounting_Num - в БД
-                ls = str(row[10].value)  # IKTS
+        # doubles = повторяющиеся в accounting_num-pu_num в БД
+        doubles = 0
+        # count = строка по которой происходит итерация.
+        # т.к. нумерация в excel начинается в excel файле начинается с 1
+        # count изанчально = 1
+        count = 1
+        # error = строка, где информация некорректна
+        errors = 0
+        # suc_sub = строка, по значениям которой
+        # произведен успешно insert into subscriber
+        suc_sub = 0
+        # suc_addr = строка, по значениям которой
+        # произведен успешно insert into address_table
+        suc_addr = 0
+        # in_base = значения строки,
+        # по которой производится итерация,
+        # аналогична значениям в БД
+        in_base = 0
+        # updated = изменения внесены в БД
+        updated = 0
+        # колличество проанализированных строк
+        row_counter = 0
+        load_type = 'old'
+        # Если верхние строчки смерджины(объединены в одну)
+        if type(ws.cell(row=count, column=count + 1)).__name__ == 'MergedCell':
+            count += 1
+        # check if row value is header
+        # добавлена проверка названия столбца и его значения
+        is_header = check_header(ws.cell(row=count, column=40).value)
+        if is_header is True:
+            count += 1
+        for row in ws.iter_rows(min_row=count):
+            try:
+                # ls = NPOTERI_PR- в excel(пример),  Accounting_Num - в БД
+                ls = str(row[40].value)
+                # сканируем занчение в 40-овом стобце для  поддержки старой логики
                 if not ls or len(ls) < 12 or not re.search('\d{5}-\d{3}-\d{2}', ls):
-                    if ls is not None and row[40].value is not None:
-                        ws.cell(column=42, row=count, value="Не корректный ЛС")
+                    # новая логика для = проверка поля IKTS(10-го стобца)
+                    # IKTS - в Excel, Accounting_Num - в БД
+                    ls = str(row[10].value)  # IKTS
+                    if not ls or len(ls) < 12 or not re.search('\d{5}-\d{3}-\d{2}', ls):
+                        if ls is not None and row[40].value is not None:
+                            ws.cell(column=42, row=count, value="Не корректный ЛС")
+                            errors += 1
+                            count += 1
+                            row_counter += 1
+                            continue
+                else:
+                    if row[40].value is not None and row[10].value is not None:
+                        ws.cell(column=42, row=count, value="Не удалось распарсить ЛС")
                         errors += 1
                         count += 1
                         row_counter += 1
                         continue
-            else:
-                if row[40].value is not None and row[10].value is not None:
-                    ws.cell(column=42, row=count, value="Не удалось распарсить ЛС")
-                    errors += 1
+
+                # по новой логике если не получилось
+                # переконвертировать ls в integer
+                # то должны возвратить 0
+                ls_int = 0
+                try:
+                    ls_str = re.sub(r'\D', '', ls)
+                    ls_int = int(ls_str)
+                except Exception as e:
+                    pass
+                    # print(repr(e))
+
+                load_type = 'new'
+                # pu_num = PU_NUM(в БД)
+                # pu_num = CHNUM(в эксель таблицах)
+                # pu_num_int - по новой логике мы записываем именно значение в формате string
+                # это может быть 0, если chnum не указан
+                pu_num_int = int(get_clean_num(row[16].value, to_check=False))
+                if pu_num_int is None or row[16].value is None:
+                    if row[40].value is None or row[10].value is None:
+                        break
+                    elif pu_num_int is None:
+                        ws.cell(column=42, row=count, value="Не корректный номер ПУ")
+                        errors += 1
+                        count += 1
+                        row_counter += 1
+                        continue
+
+                # area_id = NMPEC column, area_name= NMELSETI_M column в Excel
+                # row[2].value = NMELSETI_M column, row[3].value = NNELSETI_M column
+                res_id, area_id, area_name = get_area([row[2].value, row[3].value])
+                if not area_id:
+                    ws.cell(column=42, row=count, value="Не удалось опеределить РЭС")
                     count += 1
+                    errors += 1
                     row_counter += 1
                     continue
 
-            # по новой логике если не получилось
-            # переконвертировать ls в integer
-            # то должны возвратить 0
-            ls_int = 0
-            try:
-                ls_str = re.sub(r'\D', '', ls)
-                ls_int = int(ls_str)
-            except Exception as e:
-                mistakes_ls.append([ls, row_counter])
-                # print(repr(e))
+                # формирование данных для БД
+                id = uuid.uuid4()  # id в БД
+                address_table_id = uuid.uuid4()  # генерация id-шника для address_table_id
+                DATAPK1, DATAPK2, PU_TYPE = 'Null', 'Null', 'Null'  # если не получится привести занчения
+                # к нужному формату выставляем в Null
+                name = row[11].value  # FIO - в Excel, в name - В БД
+                POSELENIE = row[12].value  # POSELENIE в Excel и в БД
+                STREET = row[13].value  # STREET в Excel и в БД
+                HOUSE = row[14].value  # HOUSE в Excel и в БД
+                FLATNUM = row[15].value  # FLATNUM в Excel и в БД
+                zone_name = row[1].value  # NMPEC в Excel и в БД
+                # попытка привести данные к нужному формату, если не получается то, Null
+                if load_type == 'old':
+                    try:
+                        DATAPK1 = row[26].value.strftime("%Y-%m-%d")
+                    except Exception as e:
+                        pass
+                    try:
+                        DATAPK2 = row[27].value.strftime("%Y-%m-%d")
+                    except Exception as e:
+                        pass
 
-            load_type = 'new'
-            # pu_num = PU_NUM(в БД)
-            # pu_num = CHNUM(в эксель таблицах)
-            # pu_num_int - по новой логике мы записываем именно значение в формате string
-            # это может быть 0, если chnum не указан
-            pu_num_int = int(get_clean_num(row[16].value, to_check=False))
-            if pu_num_int is None or row[16].value is None:
-                if row[40].value is None or row[10].value is None:
-                    break
-                elif pu_num_int is None:
-                    ws.cell(column=42, row=count, value="Не корректный номер ПУ")
-                    errors += 1
-                    count += 1
-                    row_counter += 1
-                    continue
+                elif load_type == 'new':
+                    try:
+                        DATAPK1 = row[34].value.strftime("%Y-%m-%d")
+                    except Exception as e:
+                        pass
+                    try:
+                        DATAPK2 = row[35].value.strftime("%Y-%m-%d")
+                    except Exception as e:
+                        pass
+                # raw в конце означает сырой формат данных, нужно привести к нужному
+                PU_UST_raw = row[20].value
+                PU_UST = None
+                # проверка на отсутсвие значения PU_UST_raw
+                if PU_UST_raw is not None:
+                    PU_UST_lst = str(PU_UST_raw).split('.')
+                    for idx, entry_pu_ust in enumerate(PU_UST_lst):
+                        if entry_pu_ust == '.':
+                            PU_UST_lst[idx] = '-'
+                    # приводим к формату 2020-07-10, Year-month-day
+                    PU_UST = '-'.join(PU_UST_lst[::-1])
+                else:
+                    # если значение в столбце не указано, то пишем Null
+                    PU_UST = 'Null'
+                PU_TYPE = row[17].value
 
+                # full address reversed проверчное поле, которое добавляется в БД
+                full_address_reversed = f'''кв.{FLATNUM},д.{HOUSE},{STREET},{POSELENIE},{area_name},{zone_name}'''
+                print('full address reversed', full_address_reversed, count)
+                # провекрка ls в work_dicts['fiz_keys'], проверка pu_num'а, принадлежащего этому ls
+                # а так же проверка на дубли(repeat) связки в БД,
+                # и проверка: insert'ился ли такая связка ранее в данном файле.
+                if ls_int in work_dicts['fiz_keys'] and pu_num_int in work_dicts['fiz_keys'][ls_int] and \
+                        work_dicts['fiz_keys'][ls_int][pu_num_int]['repeat'] == 0 and \
+                        work_dicts['fiz_keys'][ls_int][pu_num_int]['is_inserted'] == 0:
 
-            # area_id = NMPEC column, area_name= NMELSETI_M column в Excel
-            # row[2].value = NMELSETI_M column, row[3].value = NNELSETI_M column
-            res_id, area_id, area_name = get_area([row[2].value, row[3].value])
-            if not area_id:
-                ws.cell(column=42, row=count, value="Не удалось опеределить РЭС")
-                count += 1
-                errors += 1
-                row_counter += 1
-                continue
+                    # сверка с шаблоном есть ли такие даннные в БД или есть ли изменения
+                    # data : [id, name, date_kp1, date_kp2, poselenie, pu_type]
+                    if (name != work_dicts['fiz_keys'][ls_int][pu_num_int]['data'][1]) or (
+                            POSELENIE != work_dicts['fiz_keys'][ls_int][pu_num_int]['data'][4]) \
+                            or (PU_TYPE != 'Null' and PU_TYPE != work_dicts['fiz_keys'][ls_int][pu_num_int]['data'][5]) or (
+                            DATAPK1 != 'Null' and DATAPK1 != work_dicts['fiz_keys'][ls_int][pu_num_int]['data'][2]) or (
+                            DATAPK2 != 'Null' and DATAPK2 != work_dicts['fiz_keys'][ls_int][pu_num_int]['data'][3]):
+                        upd_sql = f"""update ENERSTROYMAIN_SUBSCRIBER set
+                                        PU_NUM = '%s',NAME='%s',POSELENIE='%s',STREET='%s',
+                                        HOUSE='%s',FLAT_NUM='%s',area_id='%s',
+                                        full_address_reversed='%s',DATE_KP1='%s',
+                                        DATE_KP2='%s',PU_TYPE='%s',
+                                        UPDATED_BY='%s',UPDATE_TS = now(), pu_montage_date='%s'
+                                    where id='%s';""" \
+                                  % (pu_num_int, name, POSELENIE, STREET, HOUSE, FLATNUM, area_id,
+                                     full_address_reversed,
+                                     DATAPK1, DATAPK2, PU_TYPE, updated_by, PU_UST,
+                                     work_dicts['fiz_keys'][ls_int][pu_num_int]['data'][0])
 
-            # формирование данных для БД
-            id = uuid.uuid4()  # id в БД
-            address_table_id = uuid.uuid4()  # генерация id-шника для address_table_id
-            DATAPK1, DATAPK2, PU_TYPE = 'Null', 'Null', 'Null'  # если не получится привести занчения
-            # к нужному формату выставляем в Null
-            name = row[11].value  # FIO - в Excel, в name - В БД
-            POSELENIE = row[12].value  # POSELENIE в Excel и в БД
-            STREET = row[13].value  # STREET в Excel и в БД
-            HOUSE = row[14].value  # HOUSE в Excel и в БД
-            FLATNUM = row[15].value  # FLATNUM в Excel и в БД
-            zone_name = row[1].value  # NMPEC в Excel и в БД
-            # попытка привести данные к нужному формату, если не получается то, Null
-            if load_type == 'old':
-                try:
-                    DATAPK1 = row[26].value.strftime("%Y-%m-%d")
-                except Exception as e:
-                    pass
-                try:
-                    DATAPK2 = row[27].value.strftime("%Y-%m-%d")
-                except Exception as e:
-                    pass
+                        upd_sql = db.clear_sql(upd_sql)
+                        result_upd_sub = db.qdb(upd_sql, type_status=3, debug_status=debug_status)
+                        if result_upd_sub == 1:
+                            if work_dicts['fiz_keys'][ls_int][pu_num_int]['updated'] == 0:
+                                ws.cell(column=42, row=count,
+                                value="Такой ЛС уже существует, остальная информация обновлена")
+                                work_dicts['fiz_keys'][ls_int][pu_num_int]['updated'] += 1
+                            else:
+                                ws.cell(column=42, row=count,
+                                value=f"Такой ЛС уже существует, остальная информация обновлялась {work_dicts['fiz_keys'][ls_int][pu_num_int]['updated']} ")
+                                work_dicts['fiz_keys'][ls_int][pu_num_int]['updated'] += 1
 
-            elif load_type == 'new':
-                try:
-                    DATAPK1 = row[34].value.strftime("%Y-%m-%d")
-                except Exception as e:
-                    pass
-                try:
-                    DATAPK2 = row[35].value.strftime("%Y-%m-%d")
-                except Exception as e:
-                    pass
-            # raw в конце означает сырой формат данных, нужно привести к нужному
-            PU_UST_raw = row[20].value
-            PU_UST = None
-            # проверка на отсутсвие значения PU_UST_raw
-            if PU_UST_raw is not None:
-                PU_UST_lst = str(PU_UST_raw).split('.')
-                for idx, entry_pu_ust in enumerate(PU_UST_lst):
-                    if entry_pu_ust == '.':
-                        PU_UST_lst[idx] = '-'
-                # приводим к формату 2020-07-10, Year-month-day
-                PU_UST = '-'.join(PU_UST_lst[::-1])
-            else:
-                # если значение в столбце не указано, то пишем Null
-                PU_UST = 'Null'
-            PU_TYPE = row[17].value
+                            work_dicts['fiz_keys'][ls_int][pu_num_int]['data'] = [id, name, DATAPK1,
+                                                                                  DATAPK2, POSELENIE,
+                                                                                  PU_TYPE]
+                            updated += 1
+                            ws.cell(column=43, row=count,
+                                    value='%s' % work_dicts['fiz_keys'][ls_int][pu_num_int]['data'][0])
 
-            # full address reversed проверчное поле, которое добавляется в БД
-            full_address_reversed = f'''кв.{FLATNUM},д.{HOUSE},{STREET},{POSELENIE},{area_name},{zone_name}'''
-            print('full address reversed', full_address_reversed, row_counter)
-            print('in full addres reversed, independ_ciunter', idn_counter)
-            # провекрка ls в work_dicts['fiz_keys'], проверка pu_num'а, принадлежащего этому ls
-            # а так же проверка на дубли(repeat) связки в БД,
-            # и проверка: insert'ился ли такая связка ранее в данном файле.
-            if ls_int in work_dicts['fiz_keys'] and pu_num_int in work_dicts['fiz_keys'][ls_int] and \
-                    work_dicts['fiz_keys'][ls_int][pu_num_int]['repeat'] == 0 and \
-                    work_dicts['fiz_keys'][ls_int][pu_num_int]['is_inserted'] == 0:
-
-                # сверка с шаблоном есть ли такие даннные в БД или есть ли изменения
-                # data : [id, name, date_kp1, date_kp2, poselenie, pu_type]
-                if (name != work_dicts['fiz_keys'][ls_int][pu_num_int]['data'][1]) or (
-                        POSELENIE != work_dicts['fiz_keys'][ls_int][pu_num_int]['data'][4]) \
-                        or (PU_TYPE != 'Null' and PU_TYPE != work_dicts['fiz_keys'][ls_int][pu_num_int]['data'][5]) or (
-                        DATAPK1 != 'Null' and DATAPK1 != work_dicts['fiz_keys'][ls_int][pu_num_int]['data'][2]) or (
-                        DATAPK2 != 'Null' and DATAPK2 != work_dicts['fiz_keys'][ls_int][pu_num_int]['data'][3]):
-                    upd_sql = f"""update ENERSTROYMAIN_SUBSCRIBER set
-                                    PU_NUM = '%s',NAME='%s',POSELENIE='%s',STREET='%s',
-                                    HOUSE='%s',FLAT_NUM='%s',area_id='%s',
-                                    full_address_reversed='%s',DATE_KP1='%s',
-                                    DATE_KP2='%s',PU_TYPE='%s',
-                                    UPDATED_BY='nik',UPDATE_TS = now(), pu_montage_date='%s'
-                                where id='%s';""" \
-                              % (pu_num_int, name, POSELENIE, STREET, HOUSE, FLATNUM, area_id,
-                                 full_address_reversed,
-                                 DATAPK1, DATAPK2, PU_TYPE, PU_UST,
-                                 work_dicts['fiz_keys'][ls_int][pu_num_int]['data'][0])
-
-                    upd_sql = db.clear_sql(upd_sql)
-                    result_upd_sub = db.qdb(upd_sql, type_status=3, debug_status=debug_status)
-                    if result_upd_sub == 1:
-                        if work_dicts['fiz_keys'][ls_int][pu_num_int]['updated'] == 0:
-                            ws.cell(column=42, row=count,
-                                    value="Такой ЛС уже существует, остальная информация обновлена")
-                            work_dicts['fiz_keys'][ls_int][pu_num_int]['updated'] += 1
                         else:
-                            ws.cell(column=42, row=count,
-                                    value=f"Такой ЛС уже существует, остальная информация обновлялась {work_dicts['fiz_keys'][ls_int][pu_num_int]['updated']} ")
-                            work_dicts['fiz_keys'][ls_int][pu_num_int]['updated'] += 1
+                            ws.cell(column=42, row=count, value="Не записано")
+                            errors += 1
+                    else:
+                        ws.cell(column=42, row=count, value="Запись по ЛС в йоде актуальна")
+                        ws.cell(column=43, row=count, value='%s' % work_dicts['fiz_keys'][ls_int][pu_num_int]['data'][0])
+                        in_base += 1
 
-                        work_dicts['fiz_keys'][ls_int][pu_num_int]['data'] = [id, name, DATAPK1,
-                                                                              DATAPK2, POSELENIE,
-                                                                              PU_TYPE]
-                        updated += 1
-                        ws.cell(column=43, row=count,
-                                value='%s' % work_dicts['fiz_keys'][ls_int][pu_num_int]['data'][0])
+                    count += 1
+                    row_counter += 1
 
+                elif ls_int in work_dicts['fiz_keys'] and pu_num_int in work_dicts['fiz_keys'][ls_int] and \
+                        work_dicts['fiz_keys'][ls_int][pu_num_int]['repeat'] != 0:
+                    ws.cell(column=42, row=count,
+                            value="""В базе данных пристутсвует дубль связки IKTS-CHNUM, обратитесь в тех поддержку""")
+                    count += 1
+                    row_counter += 1
+                    doubles += 1
+
+                elif ls_int in work_dicts['fiz_keys'] and pu_num_int in work_dicts['fiz_keys'][ls_int] and \
+                        work_dicts['fiz_keys'][ls_int][pu_num_int]['is_inserted'] != 0:
+                    ws.cell(column=42, row=count,
+                            value="""Запись с таким IKTS-CHNUM уже была добавлены в йоду""")
+                    count += 1
+                    row_counter += 1
+                    doubles += 1
+
+                else:
+                    sql_insert_addresses = f"""INSERT INTO ENERSTROYMAIN_ADDRESS_TABLE(HOUSE,LOCALITY_NAME_MOB,
+                                                        CREATE_TS,ID,AREA_ID,UPDATED_BY,VERSION,CREATED_BY,UPDATE_TS,
+                                                        STREET_NAME_MOB,APARTMENT)
+                                                    VALUES('%s','%s',now(),'%s','%s','%s',
+                                                    1,'%s', now(),'%s','%s');""" % (
+                        HOUSE, POSELENIE, id, area_id, updated_by, created_by, STREET, FLATNUM)
+
+                    sql_insert_subscriber = f"""INSERT INTO ENERSTROYMAIN_SUBSCRIBER
+                                                    (CALC_COEFFICIENT, version,CREATED_BY,
+                                                    CREATE_TS,UPDATED_BY,UPDATE_TS,ID,
+                                                    ACCOUNTING_NUM,PU_NUM,NAME,
+                                                    POSELENIE,STREET,HOUSE,
+                                                    FLAT_NUM,area_id,DATE_KP1,
+                                                    DATE_KP2,PU_TYPE,PU_MONTAGE_DATE,
+                                                    RES_ID,ADDRESS_TABLE_ID, full_address_reversed)
+                                                VALUES (1, 1,'%s',now(),'%s',now(),'%s','%s',
+                                                '%s','%s','%s','%s','%s','%s','%s','%s','%s',
+                                                '%s','%s','%s','%s', '%s');""" \
+                                            % (created_by, updated_by, id, ls, pu_num_int, name, POSELENIE, STREET, HOUSE,
+                                               FLATNUM, area_id, DATAPK1, DATAPK2, PU_TYPE, PU_UST, res_id,
+                                               address_table_id, full_address_reversed)
+
+                    sql_ins_addr = db.clear_sql(sql_insert_addresses)
+                    result_ins_addr = db.qdb(sql_ins_addr, 3, debug_status)
+                    if result_ins_addr == 1:
+                        ws.cell(column=44, row=count, value="Запись по IKTS-CHNUM добавлена в йоду в addresses table")
+                        ws.cell(column=45, row=count, value=f'{id}')
+                        # создаем ключ и его значения
+                        work_dicts['fiz_keys'][ls_int] = {}
+                        work_dicts['fiz_keys'][ls_int][pu_num_int] = {
+                            'data': [id, name, DATAPK1, DATAPK2, POSELENIE, PU_TYPE],
+                            'repeat': 0, 'is_inserted': 0, 'updated': 0}
+                        # is_inserted = указатель на то, что данная запись уже была добавлена в йоду
+                        work_dicts['fiz_keys'][ls_int][pu_num_int]['is_inserted'] += 1
+                        suc_addr += 1
+                    else:
+                        ws.cell(column=43, row=count, value="Не записано")
+                        errors += 1
+
+                    sql_ins_sub = db.clear_sql(sql_insert_subscriber)
+                    result_ins_sub = db.qdb(sql_ins_sub, type_status=3, debug_status=debug_status)
+                    if result_ins_sub == 1:
+                        ws.cell(column=42, row=count, value="Запись по IKTS-CHNUM добавлена в йоду в subscriber table")
+                        ws.cell(column=43, row=count, value=f'{id}')
+                        # при инсерте в addres_table ранее
+                        # был создан ключ, но если бы попали в Error
+                        # то должны сделать провреку
+                        if ls_int not in work_dicts['fiz_keys']:
+                            work_dicts['fiz_keys'][ls_int] = {}
+                            if pu_num_int not in work_dicts['fiz_keys'][ls_int]:
+                                work_dicts['fiz_keys'][ls_int][pu_num_int] = {
+                                    'data': [id, name, DATAPK1, DATAPK2, POSELENIE, PU_TYPE],
+                                    'repeat': 0, 'is_inserted': 0, 'updated': 0}
+                                work_dicts['fiz_keys'][ls_int][pu_num_int]['is_inserted'] += 1
+                        suc_sub += 1
                     else:
                         ws.cell(column=42, row=count, value="Не записано")
                         errors += 1
-                else:
-                    ws.cell(column=42, row=count, value="Запись по ЛС в йоде актуальна")
-                    ws.cell(column=43, row=count, value='%s' % work_dicts['fiz_keys'][ls_int][pu_num_int]['data'][0])
-                    in_base += 1
 
-                count += 1
-                row_counter += 1
+                    count += 1
+                    row_counter += 1
+            except Exception as e:
+                pass
 
-            elif ls_int in work_dicts['fiz_keys'] and pu_num_int in work_dicts['fiz_keys'][ls_int] and \
-                    work_dicts['fiz_keys'][ls_int][pu_num_int]['repeat'] != 0:
-                ws.cell(column=42, row=count,
-                        value="""В базе данных пристутсвует дубль связки IKTS-CHNUM, обратитесь в тех поддержку""")
-                count += 1
-                row_counter += 1
-                doubles += 1
-
-            elif ls_int in work_dicts['fiz_keys'] and pu_num_int in work_dicts['fiz_keys'][ls_int] and \
-                    work_dicts['fiz_keys'][ls_int][pu_num_int]['is_inserted'] != 0:
-                ws.cell(column=42, row=count,
-                        value="""Запись с таким IKTS-CHNUM уже была добавлены в йоду""")
-                count += 1
-                row_counter += 1
-                doubles += 1
-
-            else:
-                sql_insert_addresses = f"""INSERT INTO ENERSTROYMAIN_ADDRESS_TABLE(HOUSE,LOCALITY_NAME_MOB,
-                                                    CREATE_TS,ID,AREA_ID,UPDATED_BY,VERSION,CREATED_BY,UPDATE_TS,
-                                                    STREET_NAME_MOB,APARTMENT)
-                                                VALUES('%s','%s',now(),'%s','%s','nik',
-                                                1,'nik', now(),'%s','%s');""" % (
-                    HOUSE, POSELENIE, id, area_id, STREET, FLATNUM,)
-
-                sql_insert_subscriber = f"""INSERT INTO ENERSTROYMAIN_SUBSCRIBER
-                                                (CALC_COEFFICIENT, version,CREATED_BY,
-                                                CREATE_TS,UPDATED_BY,UPDATE_TS,ID,
-                                                ACCOUNTING_NUM,PU_NUM,NAME,
-                                                POSELENIE,STREET,HOUSE,
-                                                FLAT_NUM,area_id,DATE_KP1,
-                                                DATE_KP2,PU_TYPE,PU_MONTAGE_DATE,
-                                                RES_ID,ADDRESS_TABLE_ID)
-                                            VALUES (1, 1,'nik',now(),'nik',now(),'%s','%s',
-                                            '%s','%s','%s','%s','%s','%s','%s','%s','%s',
-                                            '%s','%s','%s','%s');""" \
-                                        % (id, ls, pu_num_int, name, POSELENIE, STREET, HOUSE,
-                                           FLATNUM, area_id, DATAPK1, DATAPK2, PU_TYPE, PU_UST, res_id,
-                                           address_table_id)
-
-                sql_ins_addr = db.clear_sql(sql_insert_addresses)
-                result_ins_addr = db.qdb(sql_ins_addr, 3, debug_status)
-                if result_ins_addr == 1:
-                    ws.cell(column=44, row=count, value="Запись по IKTS-CHNUM добавлена в йоду в addresses table")
-                    ws.cell(column=45, row=count, value=f'{id}')
-                    # создаем ключ и его значения
-                    work_dicts['fiz_keys'][ls_int] = {}
-                    work_dicts['fiz_keys'][ls_int][pu_num_int] = {
-                        'data': [id, name, DATAPK1, DATAPK2, POSELENIE, PU_TYPE],
-                        'repeat': 0, 'is_inserted': 0, 'updated': 0}
-                    # is_inserted = указатель на то, что данная запись уже была добавлена в йоду
-                    work_dicts['fiz_keys'][ls_int][pu_num_int]['is_inserted'] += 1
-                    suc += 1
-                else:
-                    ws.cell(column=43, row=count, value="Не записано")
-                    errors += 1
-
-                sql_ins_sub = db.clear_sql(sql_insert_subscriber)
-                result_ins_sub = db.qdb(sql_ins_sub, type_status=3, debug_status=debug_status)
-                if result_ins_sub == 1:
-                    ws.cell(column=42, row=count, value="Запись по IKTS-CHNUM добавлена в йоду в subscriber table")
-                    ws.cell(column=43, row=count, value=f'{id}')
-                    # при инсерте в addres_table ранее
-                    # был создан ключ, но если бы попали в Error
-                    # то должны сделать провреку
-                    if ls_int not in work_dicts['fiz_keys']:
-                        work_dicts['fiz_keys'][ls_int] = {}
-                        if pu_num_int not in work_dicts['fiz_keys'][ls_int]:
-                            work_dicts['fiz_keys'][ls_int][pu_num_int] = {
-                                'data': [id, name, DATAPK1, DATAPK2, POSELENIE, PU_TYPE],
-                                'repeat': 0, 'is_inserted': 0, 'updated': 0}
-                            work_dicts['fiz_keys'][ls_int][pu_num_int]['is_inserted'] += 1
-                    suc += 1
-                else:
-                    ws.cell(column=42, row=count, value="Не записано")
-                    errors += 1
-
-                count += 1
-                row_counter += 1
-
-            print('after all, independ_ciunter', idn_counter)
+        wb.save(filename=f'{work_dicts["result_dir"]}/errors={errors}_rows={row_counter}_suc_sub={suc_sub}_suc_addr={suc_addr}_upd={updated}_in_base={in_base}_doubles={doubles}_{file}')
+        try:
+            os.rename(f'{work_dicts["work_dir"]}/{file}', f'{work_dicts["finish_dir"]}/{file}')
         except Exception as e:
-            pass
-            mistakes.append(
-                [repr(e), print(e), row_counter, row[0].value, row[1].value, row[2].value, row[3].value, row[4].value, row[5].value, row[6].value, row[7].value, row[8].value,
-                 row[9].value, row[11].value, row[12].value, row[13].value, row[14].value, row[15].value, row[16].value, row[17].value, row[18].value, row[19].value])
-            pass
+            # проверовчный принт
+            # print(repr(e))
+            print(f'move to finish dir not suc {file}')
+    else:
+        wb.save(filename=f'{work_dicts["result_dir"]}/not_enough_columns_{file}')
+        try:
+            os.rename(f'{work_dicts["work_dir"]}/{file}', f'{work_dicts["finish_dir"]}/{file}')
+        except Exception as e:
+            # проверовчный принт
+            # print(repr(e))
+            print(f'move to finish dir not suc {file}')
 
-    wb.save(
-        filename=f'{work_dicts["result_dir"]}/errors={errors}_rows={row_counter}_suc={suc}_upd={updated}_in_base={in_base}_doubles={doubles}_{file}')
-    try:
-        os.rename(f'{work_dicts["work_dir"]}/{file}', f'{work_dicts["finish_dir"]}/{file}')
-    except Exception as e:
-        # проверовчный принт
-        # print(repr(e))
-        print(f'move to finish dir not suc {file}')
+
 
 
 # ф-ция для конвертации в xlsx файл
@@ -563,5 +567,3 @@ if __name__ == '__main__':
         print('No connection to DB')
     end_t = time.time()
     print(end_t - start_t)
-    for mist in mistakes:
-        print(mist)
